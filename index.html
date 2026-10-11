@@ -1,0 +1,581 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Moistmaker – Rain radar Amsterdam West</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+  <style>
+    :root { --bg: #fff; --fg: #1a1a1a; --muted: #666; --accent: #1565c0; --warn: #b26a00; --err: #c62828; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; font: 15px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color: var(--fg); }
+    #map { position: absolute; inset: 0; }
+    .panel {
+      position: absolute; z-index: 1000; top: 12px; left: 50%; transform: translateX(-50%);
+      background: var(--bg); border-radius: 10px; box-shadow: 0 2px 12px rgba(0,0,0,.25);
+      padding: 10px 14px; display: flex; align-items: center; gap: 14px; max-width: calc(100% - 24px);
+      overflow: hidden;
+    }
+    #progress {
+      position: absolute; left: 0; bottom: 0; height: 3px; width: 0; background: var(--accent);
+      transition: width .15s linear, opacity .3s; opacity: 0;
+    }
+    #progress.active { opacity: 1; }
+    .when-label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+    #when {
+      font: inherit; font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums;
+      color: inherit; background: transparent; border: 0; padding: 0 2px 0 0; margin-left: -2px; cursor: pointer; max-width: 100%;
+    }
+    #age { font-size: 13px; color: var(--muted); }
+    #age.stale { color: var(--warn); font-weight: 600; }
+    #age.error { color: var(--err); font-weight: 600; }
+    button {
+      font: inherit; font-weight: 600; border: 0; border-radius: 8px; padding: 10px 16px;
+      background: var(--accent); color: #fff; cursor: pointer; white-space: nowrap;
+      min-width: 7.5em; font-variant-numeric: tabular-nums;
+    }
+    button:disabled { opacity: .6; cursor: progress; }
+    .snapshot { display: flex; align-items: center; gap: 4px; }
+    .when-block { min-width: 0; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    /* Phones: full-width bar, smaller date, icon-only refresh that spins while busy. */
+    @media (max-width: 560px) {
+      .panel { left: 8px; right: 8px; top: 8px; transform: none; max-width: none; gap: 8px; padding: 8px 10px; }
+      .when-block { flex: 1; }
+      .when-label { font-size: 11px; }
+      #when { font-size: 16px; flex: 1; min-width: 0; }
+      #refresh { min-width: 0; width: 44px; height: 44px; padding: 0; border-radius: 50%; flex: none; font-size: 20px; }
+      #refresh .label { display: none; }
+      #refresh .icon { display: inline-block; }
+      #refresh.busy .icon { display: inline-block; animation: spin 1s linear infinite; }
+    }
+    button.step {
+      min-width: 0; padding: 0; width: 28px; height: 28px; border-radius: 50%;
+      background: transparent; color: var(--fg); font-size: 20px; line-height: 1;
+    }
+    button.step:hover:not(:disabled) { background: #eee; }
+    button.step:disabled { opacity: .25; cursor: default; }
+    .radar { image-rendering: pixelated; }
+    .legend { background: var(--bg); padding: 8px; border-radius: 8px; box-shadow: 0 1px 6px rgba(0,0,0,.25); }
+    .legend select { font: inherit; font-size: 13px; display: block; margin-bottom: 6px; }
+    .legend canvas { display: block; }
+    .legend label { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+    .legend input[type=range] { flex: 1; min-width: 0; }
+    .home-icon {
+      width: 28px; height: 28px; border-radius: 50% 50% 50% 0; transform: rotate(-45deg);
+      background: #c62828; border: 2px solid #fff; box-shadow: 0 1px 4px rgba(0,0,0,.4);
+      display: grid; place-items: center;
+    }
+    .home-icon svg { transform: rotate(45deg); }
+    .home-controls a { font-size: 16px; color: var(--fg); cursor: pointer; }
+    .home-controls a.active { background: var(--accent); color: #fff; }
+    .picking-home, .picking-home .leaflet-interactive { cursor: crosshair !important; }
+    .rain-tip { font-variant-numeric: tabular-nums; }
+    .rain-tip b { font-size: 14px; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div class="panel">
+    <div class="when-block">
+      <div class="when-label">KNMI radar image from</div>
+      <div class="snapshot">
+        <button id="older" class="step" type="button" title="Previous snapshot (5 min earlier)" aria-label="Previous snapshot">‹</button>
+        <select id="when" aria-label="Radar snapshot"><option>loading…</option></select>
+        <button id="newer" class="step" type="button" title="Next snapshot (5 min later)" aria-label="Next snapshot">›</button>
+      </div>
+      <div id="age">&nbsp;</div>
+    </div>
+    <button id="refresh" type="button" aria-label="Refresh"><span class="icon">↻</span> <span class="label">Refresh</span></button>
+    <div id="progress" role="progressbar" aria-label="Radar download progress" aria-valuemin="0" aria-valuemax="100"></div>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+  <script src="https://unpkg.com/protomaps-leaflet@5.1.0/dist/protomaps-leaflet.js"></script>
+  <script>
+    // KNMI public ADAGUC server: 1 km precipitation radar composite (mm/h), updated every 5 minutes.
+    // We fetch the raw values through WCS and colour them ourselves with a matplotlib colour map.
+    const KNMI = 'https://geoservices.knmi.nl/adagucserver?dataset=RADAR&';
+    const LAYER = 'RAD_NL25_PCP_CM';
+    const AMSTERDAM_WEST = [52.372, 4.835];
+    const STALE_MINUTES = 15;
+    const CACHE_MAX_MINUTES = 30; // show the last radar image from localStorage on load if it's at most this old
+    // Extent of basemap.pmtiles, built in CI by scripts/build-basemap.sh (keep in sync).
+    const BASEMAP_BOUNDS = L.latLngBounds([52.10, 4.39], [52.64, 5.28]);
+    // Area fetched, in Web Mercator metres: ~370 km square around Amsterdam, covering the whole country.
+    const BBOX = [230000, 6560000, 830000, 7160000];
+    const GRID = 360; // cells per side, ~1 km on the ground at this latitude
+    const MIN_RAIN = 0.1, MAX_RAIN = 100; // mm/h, log scale; below MIN_RAIN is drawn transparent
+
+    // What each band of the scale feels like outside; also the tick marks on the legend.
+    const RAIN_CLASSES = [
+      { min: 0.1, name: 'drizzle', feel: 'barely noticeable' },
+      { min: 0.5, name: 'light', feel: 'hood up' },
+      { min: 2, name: 'moderate', feel: 'umbrella needed' },
+      { min: 5, name: 'heavy', feel: 'soaked in minutes' },
+      { min: 10, name: 'very heavy', feel: 'stay inside' },
+      { min: 30, name: 'downpour', feel: 'streets flooding' },
+    ];
+    const rainClass = mm => RAIN_CLASSES.findLast(c => mm >= c.min);
+
+    // Ten evenly spaced samples of each matplotlib colour map, interpolated linearly.
+    const COLORMAPS = {
+      viridis: ['#440154', '#482878', '#3e4989', '#31688e', '#26828e', '#1f9e89', '#35b779', '#6ece58', '#b5de2b', '#fde725'],
+      plasma: ['#0d0887', '#46039f', '#7201a8', '#9c179e', '#bd3786', '#d8576b', '#ed7953', '#fb9f3a', '#fdca26', '#f0f921'],
+      inferno: ['#000004', '#1b0c41', '#4a0c6b', '#781c6d', '#a52c60', '#cf4446', '#ed6925', '#fb9b06', '#f7d13d', '#fcffa4'],
+      magma: ['#000004', '#180f3d', '#440f76', '#721f81', '#9e2f7f', '#cd4071', '#f1605d', '#fd9668', '#feca8d', '#fcfdbf'],
+      cividis: ['#00224e', '#123570', '#3b496c', '#575d6d', '#707173', '#8a8678', '#a59c74', '#c3b369', '#e1cc55', '#fee838'],
+      turbo: ['#30123b', '#4662d7', '#36aaf9', '#1ae4b6', '#72fe5e', '#c8ef34', '#faba39', '#f66b19', '#ca2a04', '#7a0403'],
+    };
+
+    // User settings, remembered in localStorage.
+    const settings = { cmap: 'viridis', opacity: 0.75, home: AMSTERDAM_WEST };
+    try {
+      const saved = JSON.parse(localStorage.settings);
+      if (COLORMAPS[saved.cmap]) settings.cmap = saved.cmap;
+      if (saved.opacity >= 0.1 && saved.opacity <= 1) settings.opacity = saved.opacity;
+      if (Array.isArray(saved.home) && saved.home.length === 2 && saved.home.every(Number.isFinite)) settings.home = saved.home;
+    } catch {}
+    function saveSettings() {
+      try { localStorage.settings = JSON.stringify(settings); } catch {}
+    }
+
+    // 256-entry RGB lookup table for the current colour map.
+    function lut(name) {
+      const stops = COLORMAPS[name].map(h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16)));
+      const out = new Uint8ClampedArray(256 * 3);
+      for (let i = 0; i < 256; i++) {
+        const f = (i / 255) * (stops.length - 1), k = Math.min(Math.floor(f), stops.length - 2), t = f - k;
+        for (let c = 0; c < 3; c++) out[i * 3 + c] = stops[k][c] + (stops[k + 1][c] - stops[k][c]) * t;
+      }
+      return out;
+    }
+
+    const toUnit = mm => Math.min(1, Math.max(0, Math.log10(mm / MIN_RAIN) / Math.log10(MAX_RAIN / MIN_RAIN)));
+    // Rain is stored as one byte per cell: 0 = none (or no data), 1..255 = position on the log scale.
+    const toLevel = mm => 1 + Math.round(toUnit(mm) * 254);
+    const fromLevel = level => MIN_RAIN * (MAX_RAIN / MIN_RAIN) ** ((level - 1) / 254);
+
+    const map = L.map('map', {
+      zoomControl: false, minZoom: 10, maxZoom: 17,
+      maxBounds: BASEMAP_BOUNDS, maxBoundsViscosity: 1,
+    }).setView(settings.home, 11);
+    L.control.zoom({ position: 'bottomright' }).addTo(map);
+    protomapsL.leafletLayer({
+      url: 'basemap.pmtiles', flavor: 'grayscale', lang: 'en', maxDataZoom: 14,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://protomaps.com">Protomaps</a>',
+    }).addTo(map);
+
+    const bounds = L.latLngBounds(
+      L.CRS.EPSG3857.unproject(L.point(BBOX[0], BBOX[1])),
+      L.CRS.EPSG3857.unproject(L.point(BBOX[2], BBOX[3])),
+    );
+    const canvas = document.createElement('canvas');
+    let radar = null;
+    let grid = null; // { iso, ncols, nrows, levels: Uint8Array }
+
+    function drawRadar() {
+      if (!grid) return;
+      const table = lut(settings.cmap);
+      canvas.width = grid.ncols;
+      canvas.height = grid.nrows;
+      const ctx = canvas.getContext('2d');
+      const img = ctx.createImageData(grid.ncols, grid.nrows);
+      for (let i = 0; i < grid.levels.length; i++) {
+        const level = grid.levels[i];
+        if (!level) continue; // leave transparent
+        const j = Math.round((level - 1) * 255 / 254) * 3;
+        img.data.set([table[j], table[j + 1], table[j + 2], 255], i * 4);
+      }
+      ctx.putImageData(img, 0, 0);
+      const url = canvas.toDataURL();
+      if (radar) radar.setUrl(url);
+      else radar = L.imageOverlay(url, bounds, {
+        opacity: settings.opacity, className: 'radar',
+        attribution: 'Radar &copy; <a href="https://www.knmi.nl/">KNMI</a>',
+      }).addTo(map);
+    }
+
+    // Hover (or tap) a square to see its rain rate.
+    const hoverTip = L.tooltip({ direction: 'top', offset: [0, -10], className: 'rain-tip' });
+    const hoverCell = L.rectangle([[0, 0], [0, 0]], { color: '#1a1a1a', weight: 1.5, fill: false, interactive: false });
+
+    function showRainAt(latlng) {
+      if (!grid) return;
+      const p = L.CRS.EPSG3857.project(latlng);
+      const cw = (BBOX[2] - BBOX[0]) / grid.ncols, ch = (BBOX[3] - BBOX[1]) / grid.nrows;
+      const col = Math.floor((p.x - BBOX[0]) / cw), row = Math.floor((BBOX[3] - p.y) / ch);
+      if (col < 0 || row < 0 || col >= grid.ncols || row >= grid.nrows) return hideRain();
+      const level = grid.levels[row * grid.ncols + col];
+      let html = `<b>dry</b> (&lt; ${MIN_RAIN} mm/h)`;
+      if (level) {
+        const mm = fromLevel(level), c = rainClass(mm);
+        html = `<b>${mm < 10 ? mm.toPrecision(2) : Math.round(mm)} mm/h</b><br>${c.name} · ${c.feel}`;
+      }
+      const x0 = BBOX[0] + col * cw, y1 = BBOX[3] - row * ch;
+      hoverCell.setBounds([
+        L.CRS.EPSG3857.unproject(L.point(x0, y1 - ch)),
+        L.CRS.EPSG3857.unproject(L.point(x0 + cw, y1)),
+      ]);
+      hoverTip.setLatLng(latlng).setContent(html);
+      if (!map.hasLayer(hoverTip)) { hoverTip.addTo(map); hoverCell.addTo(map); }
+    }
+    function hideRain() { hoverTip.remove(); hoverCell.remove(); }
+
+    // Home pin: drag it, or press the pin button and click the map.
+    const homeMarker = L.marker(settings.home, {
+      draggable: true, autoPan: true, title: 'Home (drag to move)',
+      icon: L.divIcon({
+        className: '', iconSize: [28, 28], iconAnchor: [14, 34],
+        html: '<div class="home-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="#fff"><path d="M12 3 2 12h3v9h6v-6h2v6h6v-9h3z"/></svg></div>',
+      }),
+    }).addTo(map);
+
+    function setHome(latlng) {
+      latlng = BASEMAP_BOUNDS.contains(latlng) ? latlng : BASEMAP_BOUNDS.getCenter();
+      homeMarker.setLatLng(latlng);
+      settings.home = [+latlng.lat.toFixed(5), +latlng.lng.toFixed(5)];
+      saveSettings();
+    }
+    homeMarker.on('dragend', () => setHome(homeMarker.getLatLng()));
+
+    let pickingHome = false, pickButton = null;
+    function setPicking(on) {
+      pickingHome = on;
+      map.getContainer().classList.toggle('picking-home', on);
+      pickButton.classList.toggle('active', on);
+      if (on) hideRain();
+    }
+
+    const homeControls = L.control({ position: 'bottomright' });
+    homeControls.onAdd = () => {
+      const div = L.DomUtil.create('div', 'leaflet-bar home-controls');
+      L.DomEvent.disableClickPropagation(div);
+      const goHome = L.DomUtil.create('a', '', div);
+      goHome.textContent = '⌂';
+      goHome.title = 'Centre on home';
+      goHome.setAttribute('role', 'button');
+      goHome.addEventListener('click', () => map.setView(homeMarker.getLatLng(), Math.max(map.getZoom(), 12)));
+      pickButton = L.DomUtil.create('a', '', div);
+      pickButton.textContent = '📍';
+      pickButton.title = 'Set home: then click the map';
+      pickButton.setAttribute('role', 'button');
+      pickButton.addEventListener('click', () => setPicking(!pickingHome));
+      // Colour map, opacity and the scale live in a panel behind this button.
+      const settingsButton = L.DomUtil.create('a', '', div);
+      settingsButton.textContent = '⚙';
+      settingsButton.title = 'Colour scale and opacity';
+      settingsButton.setAttribute('role', 'button');
+      settingsButton.setAttribute('aria-expanded', 'false');
+      settingsButton.addEventListener('click', () => {
+        legendEl.hidden = !legendEl.hidden;
+        settingsButton.classList.toggle('active', !legendEl.hidden);
+        settingsButton.setAttribute('aria-expanded', String(!legendEl.hidden));
+      });
+      return div;
+    };
+    homeControls.addTo(map);
+    document.addEventListener('keydown', e => { if (e.key === 'Escape' && pickingHome) setPicking(false); });
+
+    map.on('mousemove', e => {
+      if (pickingHome || e.originalEvent.target.closest('.leaflet-marker-icon')) hideRain();
+      else showRainAt(e.latlng);
+    });
+    map.on('click', e => {
+      if (!pickingHome) return showRainAt(e.latlng);
+      setHome(e.latlng);
+      setPicking(false);
+    });
+    map.on('mouseout', hideRain);
+    // Controls (legend, buttons, attribution) live inside the map container; don't read rain through them.
+    const controlContainer = map.getContainer().querySelector('.leaflet-control-container');
+    L.DomEvent.on(controlContainer, 'mousemove', L.DomEvent.stopPropagation);
+    controlContainer.addEventListener('mouseover', hideRain);
+
+    function drawLegend(el) {
+      const W = 220, H = 260, BAR = 14, PAD = 8;
+      const dpr = window.devicePixelRatio || 1;
+      el.width = W * dpr; el.height = (H + 2 * PAD) * dpr;
+      el.style.width = W + 'px'; el.style.height = (H + 2 * PAD) + 'px';
+      const ctx = el.getContext('2d');
+      ctx.scale(dpr, dpr);
+      const table = lut(settings.cmap);
+      for (let y = 0; y < H; y++) {
+        const j = Math.round((1 - y / (H - 1)) * 255) * 3;
+        ctx.fillStyle = `rgb(${table[j]},${table[j + 1]},${table[j + 2]})`;
+        ctx.fillRect(0, PAD + y, BAR, 1);
+      }
+      const yOf = mm => PAD + (1 - toUnit(mm)) * (H - 1);
+      ctx.textBaseline = 'middle';
+      ctx.font = '12px system-ui, sans-serif';
+      ctx.fillStyle = '#1a1a1a';
+      for (const mm of [...RAIN_CLASSES.map(c => c.min), MAX_RAIN]) {
+        const y = Math.round(yOf(mm));
+        ctx.fillRect(BAR, y, 4, 1);
+        ctx.fillText(String(mm), BAR + 7, y);
+      }
+      // Bracket and label for each band.
+      const BX = 52;
+      RAIN_CLASSES.forEach((c, i) => {
+        const top = yOf(RAIN_CLASSES[i + 1]?.min ?? MAX_RAIN) + 2, bottom = yOf(c.min) - 2, mid = (top + bottom) / 2;
+        ctx.fillStyle = '#999';
+        ctx.fillRect(BX, top, 1, bottom - top);
+        ctx.fillRect(BX, top, 4, 1);
+        ctx.fillRect(BX, bottom, 4, 1);
+        ctx.font = '600 12px system-ui, sans-serif';
+        ctx.fillStyle = '#1a1a1a';
+        ctx.fillText(c.name, BX + 9, mid - 7);
+        ctx.font = '11px system-ui, sans-serif';
+        ctx.fillStyle = '#666';
+        ctx.fillText(c.feel, BX + 9, mid + 7);
+      });
+    }
+
+    // Added after the buttons, so Leaflet stacks it just above them in the corner.
+    let legendEl = null;
+    const legend = L.control({ position: 'bottomright' });
+    legend.onAdd = () => {
+      const div = legendEl = L.DomUtil.create('div', 'legend');
+      div.hidden = true;
+      L.DomEvent.disableClickPropagation(div);
+      L.DomEvent.disableScrollPropagation(div);
+      const select = L.DomUtil.create('select', '', div);
+      select.setAttribute('aria-label', 'Colour map');
+      for (const name of Object.keys(COLORMAPS)) select.add(new Option(name, name, false, name === settings.cmap));
+      const opacityLabel = L.DomUtil.create('label', '', div);
+      opacityLabel.textContent = 'Opacity';
+      const opacity = L.DomUtil.create('input', '', opacityLabel);
+      Object.assign(opacity, { type: 'range', min: 0.1, max: 1, step: 0.05, value: settings.opacity });
+      opacity.addEventListener('input', () => {
+        settings.opacity = Number(opacity.value);
+        radar?.setOpacity(settings.opacity);
+        saveSettings();
+      });
+      const caption = L.DomUtil.create('div', '', div);
+      caption.textContent = 'mm/h';
+      caption.style.cssText = 'font-size:12px;color:var(--muted)';
+      const bar = L.DomUtil.create('canvas', '', div);
+      drawLegend(bar);
+      select.addEventListener('change', () => {
+        settings.cmap = select.value;
+        saveSettings();
+        drawLegend(bar);
+        drawRadar();
+      });
+      return div;
+    };
+    legend.addTo(map);
+
+    const whenEl = document.getElementById('when');
+    const ageEl = document.getElementById('age');
+    const btn = document.getElementById('refresh');
+    // Busy text replaces the button label; null restores "↻ Refresh".
+    function setButton(text) {
+      btn.classList.toggle('busy', text !== null);
+      btn.querySelector('.icon').hidden = text !== null;
+      btn.querySelector('.label').textContent = text ?? 'Refresh';
+    }
+    const SNAPSHOT_HOURS = 3; // how far back the snapshot dropdown goes
+    let radarTime = null;
+    let latestIso = null;
+
+    // Phones drop the weekday so the date fits next to the step buttons.
+    const fmt = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Europe/Amsterdam', day: 'numeric', month: 'short',
+      hour: '2-digit', minute: '2-digit', timeZoneName: 'short',
+      ...(matchMedia('(max-width: 560px)').matches ? {} : { weekday: 'short' }),
+    });
+
+    function renderAge() {
+      if (!radarTime) return;
+      const mins = Math.round((Date.now() - radarTime) / 60000);
+      const ago = mins <= 0 ? 'just now' : mins === 1 ? '1 minute ago' : `${mins} minutes ago`;
+      const older = latestIso && grid?.iso !== latestIso;
+      ageEl.textContent = older ? `${ago} · older snapshot` : ago;
+      ageEl.className = !older && mins > STALE_MINUTES ? 'stale' : '';
+    }
+
+    // Available snapshot times, newest first, from the WMS time dimension ("start/end/PT5M" or a list).
+    async function snapshotTimes() {
+      const res = await fetch(`${KNMI}SERVICE=WMS&REQUEST=GetCapabilities&_=${Date.now()}`, { cache: 'no-store' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const xml = new DOMParser().parseFromString(await res.text(), 'text/xml');
+      for (const layer of xml.getElementsByTagName('Layer')) {
+        const name = [...layer.children].find(c => c.tagName === 'Name');
+        if (name?.textContent !== LAYER) continue;
+        const dim = [...layer.children].find(c => c.tagName === 'Dimension' && c.getAttribute('name') === 'time');
+        if (!dim) break;
+        const text = dim.textContent.trim();
+        const range = /^([^/,]+)\/([^/,]+)\/PT(\d+)M$/.exec(text);
+        if (!range) return text.split(',').map(t => t.trim()).reverse().slice(0, (SNAPSHOT_HOURS * 60) / 5 + 1);
+        const first = new Date(range[1]), last = new Date(range[2]), step = range[3] * 60000;
+        const times = [];
+        for (let t = last.getTime(); t >= first && t >= last - SNAPSHOT_HOURS * 3600000; t -= step) {
+          times.push(new Date(t).toISOString().replace('.000Z', 'Z'));
+        }
+        return times;
+      }
+      throw new Error('no time dimension in capabilities');
+    }
+
+    // Options are newest first, so "older" moves down the list.
+    const olderBtn = document.getElementById('older');
+    const newerBtn = document.getElementById('newer');
+    function updateStepButtons() {
+      const i = whenEl.selectedIndex, n = whenEl.options.length;
+      olderBtn.disabled = !latestIso || i < 0 || i >= n - 1;
+      newerBtn.disabled = !latestIso || i <= 0;
+    }
+    function step(delta) {
+      const i = whenEl.selectedIndex + delta;
+      if (i < 0 || i >= whenEl.options.length) return;
+      whenEl.selectedIndex = i;
+      updateStepButtons();
+      loadSnapshot(whenEl.value);
+    }
+
+    function setSnapshotOptions(times) {
+      whenEl.replaceChildren(...times.map(iso => new Option(fmt.format(new Date(iso)), iso)));
+      updateStepButtons();
+    }
+
+    // ESRI ASCII grid: six header lines, then rows of values from north to south.
+    // The response is gzipped without a known length, so progress is measured in rows received.
+    async function fetchGrid(iso, onProgress) {
+      const params = new URLSearchParams({
+        SERVICE: 'WCS', VERSION: '1.0.0', REQUEST: 'GetCoverage', COVERAGE: LAYER, FORMAT: 'aaigrid',
+        CRS: 'EPSG:3857', BBOX: BBOX.join(','), WIDTH: GRID, HEIGHT: GRID, TIME: iso,
+      });
+      const res = await fetch(KNMI + params);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      let text = '';
+      if (res.body) {
+        const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+        const totalLines = GRID + 6;
+        let lineCount = 0;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          text += value;
+          for (let i = value.indexOf('\n'); i !== -1; i = value.indexOf('\n', i + 1)) lineCount++;
+          onProgress(Math.min(1, lineCount / totalLines));
+        }
+      } else {
+        text = await res.text();
+      }
+      const lines = text.split('\n');
+      const header = {};
+      for (const line of lines.slice(0, 6)) {
+        const [key, val] = line.trim().split(/\s+/);
+        header[key.toLowerCase()] = Number(val);
+      }
+      const values = lines.slice(6).join(' ').trim().split(/\s+/).map(Number);
+      if (values.length !== header.ncols * header.nrows) throw new Error('unexpected grid size');
+      const levels = Uint8Array.from(values, v => v >= MIN_RAIN && v !== header.nodata_value ? toLevel(v) : 0);
+      return { iso, ncols: header.ncols, nrows: header.nrows, levels };
+    }
+
+    function saveCache(g) {
+      try {
+        let bin = '';
+        for (let i = 0; i < g.levels.length; i += 0x8000) bin += String.fromCharCode(...g.levels.subarray(i, i + 0x8000));
+        localStorage.radar = JSON.stringify({ iso: g.iso, bbox: BBOX.join(), ncols: g.ncols, nrows: g.nrows, levels: btoa(bin) });
+      } catch {}
+    }
+
+    function loadCache() {
+      try {
+        const c = JSON.parse(localStorage.radar);
+        if (c.bbox !== BBOX.join() || Date.now() - new Date(c.iso) > CACHE_MAX_MINUTES * 60000) return null;
+        const levels = Uint8Array.from(atob(c.levels), ch => ch.charCodeAt(0));
+        if (levels.length !== c.ncols * c.nrows) return null;
+        return { iso: c.iso, ncols: c.ncols, nrows: c.nrows, levels };
+      } catch {
+        return null;
+      }
+    }
+
+    function show(g) {
+      grid = g;
+      drawRadar();
+      radarTime = new Date(g.iso);
+      if (![...whenEl.options].some(o => o.value === g.iso)) whenEl.add(new Option(fmt.format(radarTime), g.iso), 0);
+      whenEl.value = g.iso;
+      updateStepButtons();
+      renderAge();
+    }
+
+    const progressEl = document.getElementById('progress');
+    function setProgress(fraction) {
+      const pct = Math.round(fraction * 100);
+      progressEl.classList.add('active');
+      progressEl.style.width = pct + '%';
+      progressEl.setAttribute('aria-valuenow', pct);
+      setButton(`${pct}%`);
+    }
+
+    // Snapshots already downloaded this visit, so flicking back and forth is instant.
+    const grids = new Map();
+    let loadToken = 0;
+
+    async function loadSnapshot(iso) {
+      const token = ++loadToken;
+      btn.disabled = true;
+      try {
+        let g = grids.get(iso);
+        if (!g) {
+          setButton('Waiting…');
+          ageEl.textContent = 'Loading this snapshot…';
+          ageEl.className = '';
+          g = await fetchGrid(iso, f => { if (token === loadToken) setProgress(f); });
+          grids.set(iso, g);
+          if (iso === latestIso) saveCache(g);
+        }
+        if (token === loadToken) show(g);
+      } catch (err) {
+        if (token !== loadToken) return;
+        if (grid) { whenEl.value = grid.iso; updateStepButtons(); } // keep the dropdown showing what's actually on the map
+        ageEl.textContent = `Could not load radar data (${err.message})`;
+        ageEl.className = 'error';
+      } finally {
+        if (token === loadToken) {
+          progressEl.classList.remove('active');
+          progressEl.style.width = '0';
+          progressEl.removeAttribute('aria-valuenow');
+          btn.disabled = false;
+          setButton(null);
+        }
+      }
+    }
+
+    // Fetch the list of snapshots and jump to the newest.
+    async function refresh() {
+      btn.disabled = true;
+      setButton('Checking…');
+      try {
+        const times = await snapshotTimes();
+        latestIso = times[0];
+        setSnapshotOptions(times);
+        if (grid) grids.set(grid.iso, grid);
+      } catch (err) {
+        ageEl.textContent = `Could not load radar data (${err.message})`;
+        ageEl.className = 'error';
+        btn.disabled = false;
+        setButton(null);
+        if (grid) { whenEl.value = grid.iso; updateStepButtons(); }
+        return;
+      }
+      await loadSnapshot(latestIso);
+    }
+
+    btn.addEventListener('click', refresh);
+    whenEl.addEventListener('change', () => { updateStepButtons(); loadSnapshot(whenEl.value); });
+    olderBtn.addEventListener('click', () => step(1));
+    newerBtn.addEventListener('click', () => step(-1));
+    setInterval(renderAge, 30000);
+    const cached = loadCache();
+    if (cached) show(cached);
+    refresh();
+  </script>
+</body>
+</html>

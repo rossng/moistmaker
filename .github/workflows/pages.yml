@@ -1,0 +1,62 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 4 1 * *" # refresh the basemap monthly
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  PMTILES_VERSION: 1.31.2
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Month for basemap cache key
+        id: month
+        run: echo "month=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache basemap
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: basemap.pmtiles
+          key: basemap-${{ steps.month.outputs.month }}-${{ hashFiles('scripts/build-basemap.sh') }}
+
+      - name: Build basemap
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          curl -sSL "https://github.com/protomaps/go-pmtiles/releases/download/v${PMTILES_VERSION}/go-pmtiles_${PMTILES_VERSION}_Linux_x86_64.tar.gz" | tar -xz -C /usr/local/bin pmtiles
+          scripts/build-basemap.sh basemap.pmtiles
+
+      - name: Assemble site
+        run: |
+          mkdir _site
+          cp index.html basemap.pmtiles _site/
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
