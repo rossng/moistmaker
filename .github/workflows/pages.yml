@@ -45,7 +45,7 @@ jobs:
       - name: Assemble site
         run: |
           mkdir _site
-          cp index.html basemap.pmtiles _site/
+          cp index.html favicon.svg apple-touch-icon.png basemap.pmtiles _site/
 
       - uses: actions/upload-pages-artifact@v3
         with:

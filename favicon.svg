@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="viridis" x1="0" y1="0" x2="0.3" y2="1">
+      <stop offset="0" stop-color="#fde725"/>
+      <stop offset="0.25" stop-color="#b5de2b"/>
+      <stop offset="0.45" stop-color="#35b779"/>
+      <stop offset="0.68" stop-color="#26828e"/>
+      <stop offset="0.88" stop-color="#3e4989"/>
+      <stop offset="1" stop-color="#440154"/>
+    </linearGradient>
+  </defs>
+  <path d="M32 2C32 2 9 26 9 39a23 23 0 0 0 46 0C55 26 32 2 32 2z" fill="url(#viridis)"/>
+  <path d="M19.5 40.5a12.5 12.5 0 0 0 8.5 12" fill="none" stroke="#fff" stroke-opacity=".8" stroke-width="5" stroke-linecap="round"/>
+</svg>
